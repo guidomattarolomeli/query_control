@@ -1,0 +1,321 @@
+drop table Temp_45.REVENUES_CDG_SELLER_MLA_XD5;
+drop table Temp_45.REVENUES_CDG_SELLER_MLA_FBM5;
+drop table Temp_45.REVENUES_CDG_SELLER_MLA_DS5;
+drop table temp_45.REVENUES_CDG_SELLER_MLA5;
+drop table temp_45.DUMP_REVENUES_SELLER_MLA5;
+
+
+--------------------------------------------------------------------
+----REVENUES SELLERS--
+--------------------------------------------------------------------
+
+create multiset table Temp_45.REVENUES_CDG_SELLER_MLA_XD5 as (
+SELECT 
+cdg.shp_month_handling, s.shp_shipment_id, si.shp_order_id, i.ite_item_id, s.shp_quantity as Shp_Qty,
+si.shp_quantity as Item_Qty_Order, si.shp_sender_id as shp_sender_id,
+b.bid_site_current_price,
+CASE WHEN b.cbo_combo_id not in ('A') THEN 0 ELSE 1 END AS Publicacion,  --Flag a las publicaicones free/not free
+CASE WHEN i.ite_condition = 'new' THEN 0 ELSE 1 END AS Articulo, --Flag articulo nuevo/usado
+--Sis con FS opcional, debajo del thresh
+CASE WHEN b.ite_shp_payment_type_id = 'free_shipping' and (b.bid_site_current_price< 3500 or Publicacion> 0 or Articulo > 0)  THEN (1*Item_Qty_Order) ELSE 0 END AS FS_Item_opcional,
+--Sis con FS mandatory, por arriba del tresh
+CASE WHEN Publicacion= 0 and Articulo = 0 and B.bid_site_current_price>=3500 then (1*Item_Qty_Order) else 0 end as FS_ITEM_mandatory,
+--Sis con FS (opcional + mandatory)
+CASE WHEN b.ite_shp_payment_type_id = 'free_shipping' THEN (1*Item_Qty_Order) else 0 end as FS_ITEM_FLAG,
+--Sellers que son tienda oficial
+CASE WHEN SSL.SEGMENTO = 'TO' THEN 1 ELSE 0 END AS T_Oficial,
+--flag de reputacion del seller
+CASE WHEN b.BID_SELL_REP_LEVEL = 'green_platinum' OR b.BID_SELL_REP_LEVEL = 'green_gold' OR b.BID_SELL_REP_LEVEL  = 'green_silver' THEN 1
+     WHEN b.BID_SELL_REP_LEVEL = 'green' OR b.BID_SELL_REP_LEVEL = 'light_green' THEN 2
+     WHEN b.BID_SELL_REP_LEVEL = 'yellow' OR b.BID_SELL_REP_LEVEL = 'newbie' THEN 3
+     WHEN b.BID_SELL_REP_LEVEL = 'red' OR b.BID_SELL_REP_LEVEL = 'orange' THEN 4
+     ELSE 0 END AS SELLER_REP,
+cdg.shp_picking_type_id_agg as PICKING_TYPE,
+--Descuento que aplica segun tipo de envio y reputacion
+CASE WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND T_Oficial = 1 THEN 0.5
+      WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND (SELLER_REP = 1 OR SELLER_REP = 2) THEN 0.5
+     WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND SELLER_REP = 3 THEN 0.4 
+     WHEN B.bid_site_current_price >= 3500 AND (Publicacion > 0 OR Articulo > 0 OR  SELLER_REP = 4) THEN 0
+     WHEN B.bid_site_current_price < 3500 THEN 0
+          ELSE 100 END AS SUBSIDIO_SELLER,
+--calculo peso volumetrico por Si
+
+CASE WHEN (si.SHP_ITE_WEIGHT*1.000/1000) <=2 THEN (si.SHP_ITE_WEIGHT*1.000/1000)
+     WHEN ((si.SHP_ITE_DIMENSION_MAX*si.SHP_ITE_DIMENSION_MID*si.SHP_ITE_DIMENSION_MIN)/4000) > (si.SHP_ITE_WEIGHT*1.000/1000) THEN ((si.SHP_ITE_DIMENSION_MAX*si.SHP_ITE_DIMENSION_MID*si.SHP_ITE_DIMENSION_MIN)/4000)
+ELSE (si.SHP_ITE_WEIGHT*1.000/1000) end as weight_item,
+
+Case when weight_item <= 0.50 then '0.5'
+          when weight_item <= 1.00 then '1'
+          when weight_item <= 2.00 then '2'
+          when weight_item <= 5.00 then '5'
+          when weight_item <= 10.00 then '10'
+          when weight_item <= 15.00 then '15'
+          when weight_item <= 20.00 then '20'
+          when weight_item <= 25.00 then '25'
+          else '30' end as rango_peso_item_seller,
+--Traigo tarifario seller
+ts.precio_seller AS Precio_Seller_It,
+CASE WHEN  (FS_Item_opcional > 0 or FS_ITEM_mandatory > 0)THEN precio_seller_It * Item_Qty_Order
+      ELSE 0 END AS Tarifario_Seller,
+-------------------------------------------------
+--construccion del tarifario seller con los descuentos correspondientes
+CASE WHEN (FS_Item_opcional > 0 or FS_ITEM_mandatory > 0)THEN (precio_seller_It * Item_Qty_Order)*(1-SUBSIDIO_SELLER)
+      ELSE 0 END AS Tarifario_Seller_desc,
+case when s.shp_sender_id in ('449695682','451402665','451403353','466063253','480263032','480265022','480448894','481988724','527927603','530380977','537044407','544457369','544457773','550063615','550070308','550072427','554328422','557616860','608846165','608885756','608887919','657077620','417972986','418149407','418150521','538990655','544453648','671347056') then 'first' else 'third' end AS FLAG_1P
+FROM WHOWNER.BT_SHP_SHIPMENTS s
+inner JOIN WHOWNER.LK_SHP_CDG_SHIPPING_COST cdg on cdg.shp_shipment_id = s.shp_shipment_id
+and cdg.sit_site_id = 'MLA'
+and cdg.shp_month_handling BETWEEN
+(case when
+trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) < 10
+then trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4)))||trim(0)||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) 
+else trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4)))||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) END)
+AND
+(case when
+trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) < 10
+then trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0)))||trim(0)||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) 
+else trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0)))||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) END)
+--and s.shp_date_handling_id not between '2021-05-21' and DATE
+AND cdg.shp_picking_type_id_agg in ('XD')
+--inner JOIN FINANCE.FS_THRESHOLD T ON (s.sit_site_id = t.site AND s.tim_day_winning_date >= t.date_from AND s.tim_day_winning_date < t.date_to)
+inner JOIN WHOWNER.BT_SHP_SHIPPING_ITEMS AS si ON si.shp_shipment_id = s.shp_shipment_id
+--AND s.shp_picking_type_id='fulfillment'
+AND si.SHP_SENDER_ID is not null
+inner JOIN WHOWNER.LK_ITE_ITEMS_PH AS i ON i.ite_item_id = si.ite_item_id 
+AND i.sit_site_id = 'MLA'
+AND i.photo_id = 'TODATE'
+inner JOIN whowner.lk_shp_address sa on s.shp_sender_address = sa.shp_add_id
+inner JOIN WHOWNER.BT_SHP_SNAPSHOT p on s.shp_shipment_id = p.shp_shipment_id
+inner  JOIN TEMP_45.TARIFARIOSELLERMLA1 ts ON rango_peso_item_seller = ts.RANGO_PESO_MELI AND PICKING_TYPE = TS.Picking_type
+--and s.shp_date_handling_id between Vigencia_desde and Vigencia_hasta
+AND TS. picking_type = 'XD'
+inner JOIN WHOWNER.BT_BIDS AS B ON si.SHP_ORDER_ID = B.ORD_ORDER_ID 
+AND s.SIT_SITE_ID = B.SIT_SITE_ID 
+AND S.SHP_RECEIVER_ID = B.CUS_CUST_ID_BUY 
+AND Si.ITE_ITEM_ID = B.ITE_ITEM_ID
+AND b.photo_id = 'TODATE'
+AND B.TIM_DAY_WINNING_DATE BETWEEN '2021-04-01' AND DATE
+LEFT JOIN WHOWNER.LK_SEGMENTO_SELLERS SSL on s.shp_sender_id= SSL.cus_cust_id_sel
+AND s.sit_site_id = SSL.sit_site_id
+
+) with data unique primary index (Shp_shipment_id, shp_order_id);
+
+
+--drop table Temp_45.REVENUES_CDG_SELLER_MLA_FBM5;
+create multiset table Temp_45.REVENUES_CDG_SELLER_MLA_FBM5 as (
+SELECT 
+cdg.shp_month_handling, s.shp_shipment_id, si.shp_order_id, i.ite_item_id, s.shp_quantity as Shp_Qty,
+si.shp_quantity as Item_Qty_Order, si.shp_sender_id as shp_sender_id,
+b.bid_site_current_price,
+CASE WHEN b.cbo_combo_id not in ('A') THEN 0 ELSE 1 END AS Publicacion,  --Flag a las publicaicones free/not free
+CASE WHEN i.ite_condition = 'new' THEN 0 ELSE 1 END AS Articulo, --Flag articulo nuevo/usado
+--Sis con FS opcional, debajo del thresh
+CASE WHEN b.ite_shp_payment_type_id = 'free_shipping' and (b.bid_site_current_price< 3500 or Publicacion> 0 or Articulo > 0)  THEN (1*Item_Qty_Order) ELSE 0 END AS FS_Item_opcional,
+--Sis con FS mandatory, por arriba del tresh
+CASE WHEN Publicacion= 0 and Articulo = 0 and B.bid_site_current_price>=3500 then (1*Item_Qty_Order) else 0 end as FS_ITEM_mandatory,
+--Sis con FS (opcional + mandatory)
+CASE WHEN b.ite_shp_payment_type_id = 'free_shipping' THEN (1*Item_Qty_Order) else 0 end as FS_ITEM_FLAG,
+--Sellers que son tienda oficial
+CASE WHEN SSL.SEGMENTO = 'TO' THEN 1 ELSE 0 END AS T_Oficial,
+--flag de reputacion del seller
+CASE WHEN b.BID_SELL_REP_LEVEL = 'green_platinum' OR b.BID_SELL_REP_LEVEL = 'green_gold' OR b.BID_SELL_REP_LEVEL  = 'green_silver' THEN 1
+     WHEN b.BID_SELL_REP_LEVEL = 'green' OR b.BID_SELL_REP_LEVEL = 'light_green' THEN 2
+     WHEN b.BID_SELL_REP_LEVEL = 'yellow' OR b.BID_SELL_REP_LEVEL = 'newbie' THEN 3
+     WHEN b.BID_SELL_REP_LEVEL = 'red' OR b.BID_SELL_REP_LEVEL = 'orange' THEN 4
+     ELSE 0 END AS SELLER_REP,
+cdg.shp_picking_type_id_agg as PICKING_TYPE,
+--Descuento que aplica segun tipo de envio y reputacion
+CASE WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND T_Oficial = 1 THEN 0.5
+      WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND (SELLER_REP = 1 OR SELLER_REP = 2) THEN 0.5
+     WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND SELLER_REP = 3 THEN 0.4 
+     WHEN B.bid_site_current_price >= 3500 AND (Publicacion > 0 OR Articulo > 0 OR  SELLER_REP = 4) THEN 0
+     WHEN B.bid_site_current_price < 3500 THEN 0
+          ELSE 100 END AS SUBSIDIO_SELLER,
+--calculo peso volumetrico por Si
+
+CASE WHEN (si.SHP_ITE_WEIGHT*1.000/1000) <=2 THEN (si.SHP_ITE_WEIGHT*1.000/1000)
+     WHEN ((si.SHP_ITE_DIMENSION_MAX*si.SHP_ITE_DIMENSION_MID*si.SHP_ITE_DIMENSION_MIN)/4000) > (si.SHP_ITE_WEIGHT*1.000/1000) THEN ((si.SHP_ITE_DIMENSION_MAX*si.SHP_ITE_DIMENSION_MID*si.SHP_ITE_DIMENSION_MIN)/4000)
+ELSE (si.SHP_ITE_WEIGHT*1.000/1000) end as weight_item,
+
+Case when weight_item <= 0.50 then '0.5'
+          when weight_item <= 1.00 then '1'
+          when weight_item <= 2.00 then '2'
+          when weight_item <= 5.00 then '5'
+          when weight_item <= 10.00 then '10'
+          when weight_item <= 15.00 then '15'
+          when weight_item <= 20.00 then '20'
+          when weight_item <= 25.00 then '25'
+          else '30' end as rango_peso_item_seller,
+--Traigo tarifario seller
+ts.precio_seller AS Precio_Seller_It,
+CASE WHEN  (FS_Item_opcional > 0 or FS_ITEM_mandatory > 0)THEN precio_seller_It * Item_Qty_Order
+      ELSE 0 END AS Tarifario_Seller,
+-------------------------------------------------
+--construccion del tarifario seller con los descuentos correspondientes
+CASE WHEN (FS_Item_opcional > 0 or FS_ITEM_mandatory > 0)THEN (precio_seller_It * Item_Qty_Order)*(1-SUBSIDIO_SELLER)
+      ELSE 0 END AS Tarifario_Seller_desc,
+case when s.shp_sender_id in ('449695682','451402665','451403353','466063253','480263032','480265022','480448894','481988724','527927603','530380977','537044407','544457369','544457773','550063615','550070308','550072427','554328422','557616860','608846165','608885756','608887919','657077620','417972986','418149407','418150521','538990655','544453648','671347056') then 'first' else 'third' end AS FLAG_1P
+FROM WHOWNER.BT_SHP_SHIPMENTS s
+inner JOIN WHOWNER.LK_SHP_CDG_SHIPPING_COST cdg on cdg.shp_shipment_id = s.shp_shipment_id
+and cdg.sit_site_id = 'MLA'
+and cdg.shp_month_handling BETWEEN
+(case when
+trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) < 10
+then trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4)))||trim(0)||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) 
+else trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4)))||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) END)
+AND
+(case when
+trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) < 10
+then trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0)))||trim(0)||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) 
+else trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0)))||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) END)
+--and s.shp_date_handling_id not between '2021-05-21' and DATE
+AND cdg.shp_picking_type_id_agg in ('FBM')
+--inner JOIN FINANCE.FS_THRESHOLD T ON (s.sit_site_id = t.site AND s.tim_day_winning_date >= t.date_from AND s.tim_day_winning_date < t.date_to)
+inner JOIN WHOWNER.BT_SHP_SHIPPING_ITEMS AS si ON si.shp_shipment_id = s.shp_shipment_id
+--AND s.shp_picking_type_id='fulfillment'
+AND si.SHP_SENDER_ID is not null
+inner JOIN WHOWNER.LK_ITE_ITEMS_PH AS i ON i.ite_item_id = si.ite_item_id 
+AND i.sit_site_id = 'MLA'
+AND i.photo_id = 'TODATE'
+inner JOIN whowner.lk_shp_address sa on s.shp_sender_address = sa.shp_add_id
+inner JOIN WHOWNER.BT_SHP_SNAPSHOT p on s.shp_shipment_id = p.shp_shipment_id
+inner JOIN TEMP_45.TARIFARIOSELLERMLA1 ts ON rango_peso_item_seller = ts.RANGO_PESO_MELI AND PICKING_TYPE = TS.Picking_type
+--and s.shp_date_handling_id between Vigencia_desde and Vigencia_hasta
+AND TS. picking_type = 'FBM'
+inner JOIN WHOWNER.BT_BIDS AS B ON si.SHP_ORDER_ID = B.ORD_ORDER_ID 
+AND s.SIT_SITE_ID = B.SIT_SITE_ID 
+AND S.SHP_RECEIVER_ID = B.CUS_CUST_ID_BUY 
+AND Si.ITE_ITEM_ID = B.ITE_ITEM_ID
+AND b.photo_id = 'TODATE'
+AND B.TIM_DAY_WINNING_DATE BETWEEN '2021-04-01' AND DATE
+LEFT JOIN WHOWNER.LK_SEGMENTO_SELLERS SSL on s.shp_sender_id= SSL.cus_cust_id_sel
+AND s.sit_site_id = SSL.sit_site_id
+
+) with data unique primary index (Shp_shipment_id, shp_order_id);
+
+--DROP TABLE temp_45.REVENUES_CDG_SELLER_MLA_DS5;
+create multiset table Temp_45.REVENUES_CDG_SELLER_MLA_DS5 as (
+SELECT 
+cdg.shp_month_handling, s.shp_shipment_id, si.shp_order_id, i.ite_item_id, s.shp_quantity as Shp_Qty,
+si.shp_quantity as Item_Qty_Order, si.shp_sender_id as shp_sender_id,
+b.bid_site_current_price,
+CASE WHEN b.cbo_combo_id not in ('A') THEN 0 ELSE 1 END AS Publicacion,  --Flag a las publicaicones free/not free
+CASE WHEN i.ite_condition = 'new' THEN 0 ELSE 1 END AS Articulo, --Flag articulo nuevo/usado
+--Sis con FS opcional, debajo del thresh
+CASE WHEN b.ite_shp_payment_type_id = 'free_shipping' and (b.bid_site_current_price< 3500 or Publicacion> 0 or Articulo > 0)  THEN (1*Item_Qty_Order) ELSE 0 END AS FS_Item_opcional,
+--Sis con FS mandatory, por arriba del tresh
+CASE WHEN Publicacion= 0 and Articulo = 0 and B.bid_site_current_price>=3500 then (1*Item_Qty_Order) else 0 end as FS_ITEM_mandatory,
+--Sis con FS (opcional + mandatory)
+CASE WHEN b.ite_shp_payment_type_id = 'free_shipping' THEN (1*Item_Qty_Order) else 0 end as FS_ITEM_FLAG,
+--Sellers que son tienda oficial
+CASE WHEN SSL.SEGMENTO = 'TO' THEN 1 ELSE 0 END AS T_Oficial,
+--flag de reputacion del seller
+CASE WHEN b.BID_SELL_REP_LEVEL = 'green_platinum' OR b.BID_SELL_REP_LEVEL = 'green_gold' OR b.BID_SELL_REP_LEVEL  = 'green_silver' THEN 1
+     WHEN b.BID_SELL_REP_LEVEL = 'green' OR b.BID_SELL_REP_LEVEL = 'light_green' THEN 2
+     WHEN b.BID_SELL_REP_LEVEL = 'yellow' OR b.BID_SELL_REP_LEVEL = 'newbie' THEN 3
+     WHEN b.BID_SELL_REP_LEVEL = 'red' OR b.BID_SELL_REP_LEVEL = 'orange' THEN 4
+     ELSE 0 END AS SELLER_REP,
+cdg.shp_picking_type_id_agg as PICKING_TYPE,
+--Descuento que aplica segun tipo de envio y reputacion
+CASE WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND T_Oficial = 1 THEN 0.5
+      WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND (SELLER_REP = 1 OR SELLER_REP = 2) THEN 0.5
+     WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND SELLER_REP = 3 THEN 0.4 
+     WHEN B.bid_site_current_price >= 3500 AND (Publicacion > 0 OR Articulo > 0 OR  SELLER_REP = 4) THEN 0
+     WHEN B.bid_site_current_price < 3500 THEN 0
+          ELSE 100 END AS SUBSIDIO_SELLER,
+--calculo peso volumetrico por Si
+
+CASE WHEN (si.SHP_ITE_WEIGHT*1.000/1000) <=2 THEN (si.SHP_ITE_WEIGHT*1.000/1000)
+     WHEN ((si.SHP_ITE_DIMENSION_MAX*si.SHP_ITE_DIMENSION_MID*si.SHP_ITE_DIMENSION_MIN)/4000) > (si.SHP_ITE_WEIGHT*1.000/1000) THEN ((si.SHP_ITE_DIMENSION_MAX*si.SHP_ITE_DIMENSION_MID*si.SHP_ITE_DIMENSION_MIN)/4000)
+ELSE (si.SHP_ITE_WEIGHT*1.000/1000) end as weight_item,
+
+Case when weight_item <= 0.50 then '0.5'
+          when weight_item <= 1.00 then '1'
+          when weight_item <= 2.00 then '2'
+          when weight_item <= 5.00 then '5'
+          when weight_item <= 10.00 then '10'
+          when weight_item <= 15.00 then '15'
+          when weight_item <= 20.00 then '20'
+          when weight_item <= 25.00 then '25'
+          else '30' end as rango_peso_item_seller,
+--Traigo tarifario seller
+ts.precio_seller AS Precio_Seller_It,
+CASE WHEN  (FS_Item_opcional > 0 or FS_ITEM_mandatory > 0)THEN precio_seller_It * Item_Qty_Order
+      ELSE 0 END AS Tarifario_Seller,
+-------------------------------------------------
+--construccion del tarifario seller con los descuentos correspondientes
+CASE WHEN (FS_Item_opcional > 0 or FS_ITEM_mandatory > 0)THEN (precio_seller_It * Item_Qty_Order)*(1-SUBSIDIO_SELLER)
+      ELSE 0 END AS Tarifario_Seller_desc,
+case when s.shp_sender_id in ('449695682','451402665','451403353','466063253','480263032','480265022','480448894','481988724','527927603','530380977','537044407','544457369','544457773','550063615','550070308','550072427','554328422','557616860','608846165','608885756','608887919','657077620','417972986','418149407','418150521','538990655','544453648','671347056') then 'first' else 'third' end AS FLAG_1P
+FROM WHOWNER.BT_SHP_SHIPMENTS s
+inner JOIN WHOWNER.LK_SHP_CDG_SHIPPING_COST cdg on cdg.shp_shipment_id = s.shp_shipment_id
+and cdg.sit_site_id = 'MLA'
+and cdg.shp_month_handling BETWEEN
+(case when
+trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) < 10
+then trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4)))||trim(0)||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) 
+else trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4)))||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) END)
+AND
+(case when
+trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) < 10
+then trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0)))||trim(0)||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) 
+else trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0)))||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) END)
+--and s.shp_date_handling_id not between '2021-05-21' and DATE
+AND cdg.shp_picking_type_id_agg in ('DS')
+--inner JOIN FINANCE.FS_THRESHOLD T ON (s.sit_site_id = t.site AND s.tim_day_winning_date >= t.date_from AND s.tim_day_winning_date < t.date_to)
+inner JOIN WHOWNER.BT_SHP_SHIPPING_ITEMS AS si ON si.shp_shipment_id = s.shp_shipment_id
+--AND s.shp_picking_type_id='fulfillment'
+AND si.SHP_SENDER_ID is not null
+inner JOIN WHOWNER.LK_ITE_ITEMS_PH AS i ON i.ite_item_id = si.ite_item_id 
+AND i.sit_site_id = 'MLA'
+AND i.photo_id = 'TODATE'
+inner JOIN whowner.lk_shp_address sa on s.shp_sender_address = sa.shp_add_id
+inner JOIN WHOWNER.BT_SHP_SNAPSHOT p on s.shp_shipment_id = p.shp_shipment_id
+inner JOIN TEMP_45.TARIFARIOSELLERMLA1 ts ON rango_peso_item_seller = ts.RANGO_PESO_MELI AND PICKING_TYPE = TS.Picking_type
+--and s.shp_date_handling_id between Vigencia_desde and Vigencia_hasta
+AND TS. picking_type = 'DS'
+inner JOIN WHOWNER.BT_BIDS AS B ON si.SHP_ORDER_ID = B.ORD_ORDER_ID 
+AND s.SIT_SITE_ID = B.SIT_SITE_ID 
+AND S.SHP_RECEIVER_ID = B.CUS_CUST_ID_BUY 
+AND Si.ITE_ITEM_ID = B.ITE_ITEM_ID
+AND b.photo_id = 'TODATE'
+AND B.TIM_DAY_WINNING_DATE BETWEEN '2021-04-01' AND DATE
+LEFT JOIN WHOWNER.LK_SEGMENTO_SELLERS SSL on s.shp_sender_id= SSL.cus_cust_id_sel
+AND s.sit_site_id = SSL.sit_site_id
+
+) with data unique primary index (Shp_shipment_id, shp_order_id);
+
+--DROP TABLE Temp_45.REVENUES_CDG_SELLER_MLA5;
+create multiset table Temp_45.REVENUES_CDG_SELLER_MLA5 as (
+SELECT * from Temp_45.REVENUES_CDG_SELLER_MLA_FBM5
+UNION ALL
+SELECT * from Temp_45.REVENUES_CDG_SELLER_MLA_XD5
+UNION ALL
+SELECT * from Temp_45.REVENUES_CDG_SELLER_MLA_DS5
+) with data unique primary index (Shp_shipment_id, shp_order_id);
+
+
+--DROP TABLE Temp_45.DUMP_REVENUES_SELLER_MLA5;
+create multiset table Temp_45.DUMP_REVENUES_SELLER_MLA5 as (
+SELECT
+shp_month_handling,
+PICKING_TYPE,
+Case when FS_Item_opcional > 0 then 'FS OPCIONAL'
+     when FS_ITEM_mandatory > 0 then 'FS MANDATORY'
+     Else 'No aplica' END as TIPO_ENVIO,
+Case when T_Oficial = 1 then 1
+     Else SELLER_REP END as SELLER_REP,
+rango_peso_item_seller,
+CASE when Publicacion > 0 or Articulo > 0 then 1 else 0 end as FLAG_GRATUITO,
+sum(Item_Qty_Order) Item_Qty_Order,
+count(distinct shp_shipment_id) shp_shipment_id,
+sum(Tarifario_Seller/1.21) as TEORICO_SELLER,
+sum(Tarifario_Seller_desc/1.21) as REAL_SELLER
+FROM Temp_45.REVENUES_CDG_SELLER_MLA5 
+--WHERE FS_ITEM_FLAG > 0 --Filtro los envios sin FS
+WHERE (FLAG_1P not in ('first'))
+AND tipo_envio IS NOT IN ('No aplica')
+group by 1,2,3,4,5,6 
+
+) with data unique primary index (shp_month_handling,PICKING_TYPE,TIPO_ENVIO,SELLER_REP,rango_peso_item_seller,FLAG_GRATUITO);
+
