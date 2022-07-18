@@ -1,321 +1,834 @@
-drop table Temp_45.REVENUES_CDG_SELLER_MLA_XD5;
-drop table Temp_45.REVENUES_CDG_SELLER_MLA_FBM5;
-drop table Temp_45.REVENUES_CDG_SELLER_MLA_DS5;
-drop table temp_45.REVENUES_CDG_SELLER_MLA5;
-drop table temp_45.DUMP_REVENUES_SELLER_MLA5;
-
 
 --------------------------------------------------------------------
 ----REVENUES SELLERS--
 --------------------------------------------------------------------
+CREATE OR REPLACE TABLE  `meli-bi-data.SBOX_SHPCDG.REVENUES_CDG_SELLER_MLA_STAGING`
+CLUSTER BY SHP_MONTH_HANDLING, Shp_Qty,Item_Qty_Order
+AS
+with SHP_STAGING as (
+  SELECT 
+    --calculo peso volumetrico por Si
+    CASE 
+        WHEN (s.SHP_ITE_WEIGHT * 1.000 / 1000) <= 2
+          THEN (s.SHP_ITE_WEIGHT * 1.000 / 1000)
+        WHEN ((s.SHP_ITE_DIMENSION_MAX * s.SHP_ITE_DIMENSION_MID * s.SHP_ITE_DIMENSION_MIN) / 4000) > (s.SHP_ITE_WEIGHT * 1.000 / 1000)
+          THEN ((s.SHP_ITE_DIMENSION_MAX * s.SHP_ITE_DIMENSION_MID * s.SHP_ITE_DIMENSION_MIN) / 4000)
+        ELSE (s.SHP_ITE_WEIGHT * 1.000 / 1000)
+        END AS weight_item,s.*
+    FROM (
+          SELECT
+          shp_shipment_id,shp_date_handling_id,shp_sender_address,SHP_RECEIVER_ID,shp_picking_type_id,item.*
+          FROM `meli-bi-data.WHOWNER.BT_SHP_SHIPMENTS` AS s,
+          UNNEST(items) as item
+          WHERE s.SHP_SENDER_ID IS NOT NULL
+          ) AS s
+      ),
+   SHP_STAGING_V2 as (
+    SELECT SH.*,
+    Case when weight_item <= 0.50 then '0.5'
+              when weight_item <= 1.00 then '1'
+              when weight_item <= 2.00 then '2'
+              when weight_item <= 5.00 then '5'
+              when weight_item <= 10.00 then '10'
+              when weight_item <= 15.00 then '15'
+              when weight_item <= 20.00 then '20'
+              when weight_item <= 25.00 then '25'
+              else '30' end as rango_peso_item_seller
+    FROM SHP_STAGING AS SH
+  )
+  SELECT
+    cdg.shp_month_handling,
+    s.shp_shipment_id,
+    s.shp_order_id,
+    i.ite_item_id,
+    s.shp_quantity AS Shp_Qty,
+    s.shp_quantity AS Item_Qty_Order,
+    s.shp_sender_id AS shp_sender_id,
+    b.ORD_ITEM.SITE_CURRENT_PRICE,
+    TS.picking_type as PICKING_TYPE_TS,
+    CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END AS Publicacion,
+    CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END AS Articulo,
+    CASE
+    WHEN CAST(cdg.shp_month_handling AS INT64) < 202202
+      THEN
+        CASE
+          WHEN
+            b.ORD_ITEM.SHIPPING.PAYMENT_TYPE_ID = 'free_shipping'
+            AND (
+              b.ORD_ITEM.SITE_CURRENT_PRICE < 3500
+              OR CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END > 0
+              OR CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END > 0)
+            THEN 1 * s.shp_quantity
+          ELSE 0
+          END
+    WHEN CAST(cdg.shp_month_handling AS INT64) >= 202202
+      THEN
+        CASE
+          WHEN
+            b.ORD_ITEM.SHIPPING.PAYMENT_TYPE_ID = 'free_shipping'
+            AND (
+              b.ORD_ITEM.SITE_CURRENT_PRICE < 4000
+              OR CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END > 0
+              OR CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END > 0)
+            THEN 1 * s.shp_quantity
+          ELSE 0
+          END
+    ELSE 0
+    END
+    AS FS_Item_opcional,
+  CASE
+    WHEN CAST(cdg.shp_month_handling AS INT64) < 202202
+      THEN
+        CASE
+          WHEN
+            CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END = 0
+            AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+            AND b.ORD_ITEM.SITE_CURRENT_PRICE >= 3500
+            THEN 1 * s.shp_quantity
+          ELSE 0
+          END
+    WHEN CAST(cdg.shp_month_handling AS INT64) >= 202202
+      THEN
+        CASE
+          WHEN
+            CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END = 0
+            AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+            AND b.ORD_ITEM.SITE_CURRENT_PRICE >= 4000
+            THEN 1 * s.shp_quantity
+          ELSE 0
+          END
+    ELSE 0
+    END
+    AS FS_ITEM_mandatory,
+  CASE
+    WHEN b.ORD_ITEM.SHIPPING.PAYMENT_TYPE_ID = 'free_shipping' THEN 1 * s.shp_quantity
+    ELSE 0
+    END
+    AS FS_ITEM_FLAG,
+  CASE WHEN SSL.SEGMENTO = 'TO' THEN 1 ELSE 0 END AS T_Oficial,
+  CASE
+    WHEN
+      b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_platinum'
+      OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_gold'
+      OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_silver'
+      THEN 1
+    WHEN b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green' OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'light_green'
+      THEN 2
+    WHEN b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'yellow' OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'newbie'
+      THEN 3
+    WHEN b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'red' OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'orange' THEN 4
+    ELSE 0
+    END
+    AS SELLER_REP,
+  cdg.shp_picking_type_id_agg AS PICKING_TYPE,
+  CASE
+    WHEN CAST(cdg.shp_month_handling AS INT64) < 202202
+      THEN
+        CASE
+          WHEN
+            b.ORD_ITEM.SITE_CURRENT_PRICE >= 3500
+            AND CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END = 0
+            AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+            AND CASE WHEN SSL.SEGMENTO = 'TO' THEN 1 ELSE 0 END = 1
+            THEN 0.5
+          WHEN
+            b.ORD_ITEM.SITE_CURRENT_PRICE >= 3500
+            AND CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END = 0
+            AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+            AND (
+              CASE
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_platinum'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_gold'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_silver'
+                  THEN 1
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'light_green'
+                  THEN 2
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'yellow'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'newbie'
+                  THEN 3
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'red'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'orange'
+                  THEN 4
+                ELSE 0
+                END = 1
+              OR CASE
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_platinum'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_gold'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_silver'
+                  THEN 1
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'light_green'
+                  THEN 2
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'yellow'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'newbie'
+                  THEN 3
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'red'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'orange'
+                  THEN 4
+                ELSE 0
+                END = 2)
+            THEN 0.5
+          WHEN
+            b.ORD_ITEM.SITE_CURRENT_PRICE >= 3500
+            AND CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END = 0
+            AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+            AND CASE
+              WHEN
+                b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_platinum'
+                OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_gold'
+                OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_silver'
+                THEN 1
+              WHEN
+                b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green'
+                OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'light_green'
+                THEN 2
+              WHEN
+                b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'yellow'
+                OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'newbie'
+                THEN 3
+              WHEN
+                b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'red'
+                OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'orange'
+                THEN 4
+              ELSE 0
+              END = 3
+            THEN 0.4
+          WHEN
+            b.ORD_ITEM.SITE_CURRENT_PRICE >= 3500
+            AND (
+              CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END > 0
+              OR CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END > 0
+              OR CASE
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_platinum'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_gold'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_silver'
+                  THEN 1
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'light_green'
+                  THEN 2
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'yellow'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'newbie'
+                  THEN 3
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'red'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'orange'
+                  THEN 4
+                ELSE 0
+                END = 4)
+            THEN 0
+          WHEN b.ORD_ITEM.SITE_CURRENT_PRICE < 3500 THEN 0
+          ELSE 100
+          END
+    WHEN CAST(cdg.shp_month_handling AS INT64) >= 202202
+      THEN
+        CASE
+          WHEN
+            b.ORD_ITEM.SITE_CURRENT_PRICE >= 4000
+            AND CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END = 0
+            AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+            AND CASE WHEN SSL.SEGMENTO = 'TO' THEN 1 ELSE 0 END = 1
+            THEN 0.5
+          WHEN
+            b.ORD_ITEM.SITE_CURRENT_PRICE >= 4000
+            AND CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END = 0
+            AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+            AND (
+              CASE
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_platinum'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_gold'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_silver'
+                  THEN 1
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'light_green'
+                  THEN 2
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'yellow'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'newbie'
+                  THEN 3
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'red'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'orange'
+                  THEN 4
+                ELSE 0
+                END = 1
+              OR CASE
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_platinum'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_gold'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_silver'
+                  THEN 1
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'light_green'
+                  THEN 2
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'yellow'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'newbie'
+                  THEN 3
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'red'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'orange'
+                  THEN 4
+                ELSE 0
+                END = 2)
+            THEN 0.5
+          WHEN
+            b.ORD_ITEM.SITE_CURRENT_PRICE >= 4000
+            AND CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END = 0
+            AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+            AND CASE
+              WHEN
+                b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_platinum'
+                OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_gold'
+                OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_silver'
+                THEN 1
+              WHEN
+                b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green'
+                OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'light_green'
+                THEN 2
+              WHEN
+                b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'yellow'
+                OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'newbie'
+                THEN 3
+              WHEN
+                b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'red'
+                OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'orange'
+                THEN 4
+              ELSE 0
+              END = 3
+            THEN 0.4
+          WHEN
+            b.ORD_ITEM.SITE_CURRENT_PRICE >= 4000
+            AND (
+              CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END > 0
+              OR CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END > 0
+              OR CASE
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_platinum'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_gold'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_silver'
+                  THEN 1
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'light_green'
+                  THEN 2
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'yellow'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'newbie'
+                  THEN 3
+                WHEN
+                  b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'red'
+                  OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'orange'
+                  THEN 4
+                ELSE 0
+                END = 4)
+            THEN 0
+          WHEN b.ORD_ITEM.SITE_CURRENT_PRICE < 4000 THEN 0
+          ELSE 100
+          END
+    ELSE 100
+    END
+    AS SUBSIDIO_SELLER,
+  s.weight_item,
+  s.rango_peso_item_seller,
+  CAST(ts.precio_seller AS NUMERIC) AS Precio_Seller_It,
+  CASE
+    WHEN
+      CASE
+        WHEN CAST(cdg.shp_month_handling AS INT64) <> 202202
+          THEN
+            CASE
+              WHEN
+                b.ORD_ITEM.SHIPPING.PAYMENT_TYPE_ID = 'free_shipping'
+                AND (
+                  b.ORD_ITEM.SITE_CURRENT_PRICE < 3500
+                  OR CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END > 0
+                  OR CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END > 0)
+                THEN 1 * s.shp_quantity
+              ELSE 0
+              END
+        WHEN CAST(cdg.shp_month_handling AS INT64) = 202202
+          THEN
+            CASE
+              WHEN
+                b.ORD_ITEM.SHIPPING.PAYMENT_TYPE_ID = 'free_shipping'
+                AND (
+                  b.ORD_ITEM.SITE_CURRENT_PRICE < 4000
+                  OR CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END > 0
+                  OR CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END > 0)
+                THEN 1 * s.shp_quantity
+              ELSE 0
+              END
+        ELSE 0
+        END > 0
+      OR CASE
+        WHEN CAST(cdg.shp_month_handling AS INT64) <> 202202
+          THEN
+            CASE
+              WHEN
+                CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END = 0
+                AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+                AND b.ORD_ITEM.SITE_CURRENT_PRICE >= 3500
+                THEN 1 * s.shp_quantity
+              ELSE 0
+              END
+        WHEN CAST(cdg.shp_month_handling AS INT64) = 202202
+          THEN
+            CASE
+              WHEN
+                CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END = 0
+                AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+                AND b.ORD_ITEM.SITE_CURRENT_PRICE >= 4000
+                THEN 1 * s.shp_quantity
+              ELSE 0
+              END
+        ELSE 0
+        END > 0
+      THEN CAST(ts.precio_seller AS NUMERIC) * s.shp_quantity
+    ELSE 0
+    END
+    AS Tarifario_Seller,
+  CASE
+    WHEN
+      CASE
+        WHEN CAST(cdg.shp_month_handling AS INT64) <> 202202
+          THEN
+            CASE
+              WHEN
+                b.ORD_ITEM.SHIPPING.PAYMENT_TYPE_ID = 'free_shipping'
+                AND (
+                  b.ORD_ITEM.SITE_CURRENT_PRICE < 3500
+                  OR CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END > 0
+                  OR CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END > 0)
+                THEN 1 * s.shp_quantity
+              ELSE 0
+              END
+        WHEN CAST(cdg.shp_month_handling AS INT64) = 202202
+          THEN
+            CASE
+              WHEN
+                b.ORD_ITEM.SHIPPING.PAYMENT_TYPE_ID = 'free_shipping'
+                AND (
+                  b.ORD_ITEM.SITE_CURRENT_PRICE < 4000
+                  OR CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END > 0
+                  OR CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END > 0)
+                THEN 1 * s.shp_quantity
+              ELSE 0
+              END
+        ELSE 0
+        END > 0
+      OR CASE
+        WHEN CAST(cdg.shp_month_handling AS INT64) <> 202202
+          THEN
+            CASE
+              WHEN
+                CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END = 0
+                AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+                AND b.ORD_ITEM.SITE_CURRENT_PRICE >= 3500
+                THEN 1 * s.shp_quantity
+              ELSE 0
+              END
+        WHEN CAST(cdg.shp_month_handling AS INT64) = 202202
+          THEN
+            CASE
+              WHEN
+                CASE WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0 ELSE 1 END = 0
+                AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+                AND b.ORD_ITEM.SITE_CURRENT_PRICE >= 4000
+                THEN 1 * s.shp_quantity
+              ELSE 0
+              END
+        ELSE 0
+        END > 0
+      THEN
+        CAST(ts.precio_seller AS NUMERIC) * s.shp_quantity * (
+          1 - CASE
+            WHEN CAST(cdg.shp_month_handling AS INT64) <> 202202
+              THEN
+                CASE
+                  WHEN
+                    b.ORD_ITEM.SITE_CURRENT_PRICE >= 3500
+                    AND CASE
+                      WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0
+                      ELSE 1
+                      END = 0
+                    AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+                    AND CASE WHEN SSL.SEGMENTO = 'TO' THEN 1 ELSE 0 END = 1
+                    THEN 0.5
+                  WHEN
+                    b.ORD_ITEM.SITE_CURRENT_PRICE >= 3500
+                    AND CASE
+                      WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0
+                      ELSE 1
+                      END = 0
+                    AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+                    AND (
+                      CASE
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_platinum'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_gold'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_silver'
+                          THEN 1
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'light_green'
+                          THEN 2
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'yellow'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'newbie'
+                          THEN 3
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'red'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'orange'
+                          THEN 4
+                        ELSE 0
+                        END = 1
+                      OR CASE
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_platinum'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_gold'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_silver'
+                          THEN 1
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'light_green'
+                          THEN 2
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'yellow'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'newbie'
+                          THEN 3
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'red'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'orange'
+                          THEN 4
+                        ELSE 0
+                        END = 2)
+                    THEN 0.5
+                  WHEN
+                    b.ORD_ITEM.SITE_CURRENT_PRICE >= 3500
+                    AND CASE
+                      WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0
+                      ELSE 1
+                      END = 0
+                    AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+                    AND CASE
+                      WHEN
+                        b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_platinum'
+                        OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_gold'
+                        OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_silver'
+                        THEN 1
+                      WHEN
+                        b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green'
+                        OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'light_green'
+                        THEN 2
+                      WHEN
+                        b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'yellow'
+                        OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'newbie'
+                        THEN 3
+                      WHEN
+                        b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'red'
+                        OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'orange'
+                        THEN 4
+                      ELSE 0
+                      END = 3
+                    THEN 0.4
+                  WHEN
+                    b.ORD_ITEM.SITE_CURRENT_PRICE >= 3500
+                    AND (
+                      CASE
+                        WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0
+                        ELSE 1
+                        END > 0
+                      OR CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END > 0
+                      OR CASE
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_platinum'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_gold'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_silver'
+                          THEN 1
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'light_green'
+                          THEN 2
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'yellow'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'newbie'
+                          THEN 3
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'red'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'orange'
+                          THEN 4
+                        ELSE 0
+                        END = 4)
+                    THEN 0
+                  WHEN b.ORD_ITEM.SITE_CURRENT_PRICE < 3500 THEN 0
+                  ELSE 100
+                  END
+            WHEN CAST(cdg.shp_month_handling AS INT64) = 202202
+              THEN
+                CASE
+                  WHEN
+                    b.ORD_ITEM.SITE_CURRENT_PRICE >= 4000
+                    AND CASE
+                      WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0
+                      ELSE 1
+                      END = 0
+                    AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+                    AND CASE WHEN SSL.SEGMENTO = 'TO' THEN 1 ELSE 0 END = 1
+                    THEN 0.5
+                  WHEN
+                    b.ORD_ITEM.SITE_CURRENT_PRICE >= 4000
+                    AND CASE
+                      WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0
+                      ELSE 1
+                      END = 0
+                    AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+                    AND (
+                      CASE
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_platinum'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_gold'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_silver'
+                          THEN 1
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'light_green'
+                          THEN 2
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'yellow'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'newbie'
+                          THEN 3
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'red'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'orange'
+                          THEN 4
+                        ELSE 0
+                        END = 1
+                      OR CASE
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_platinum'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_gold'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_silver'
+                          THEN 1
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'light_green'
+                          THEN 2
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'yellow'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'newbie'
+                          THEN 3
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'red'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'orange'
+                          THEN 4
+                        ELSE 0
+                        END = 2)
+                    THEN 0.5
+                  WHEN
+                    b.ORD_ITEM.SITE_CURRENT_PRICE >= 4000
+                    AND CASE
+                      WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0
+                      ELSE 1
+                      END = 0
+                    AND CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END = 0
+                    AND CASE
+                      WHEN
+                        b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_platinum'
+                        OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_gold'
+                        OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_silver'
+                        THEN 1
+                      WHEN
+                        b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green'
+                        OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'light_green'
+                        THEN 2
+                      WHEN
+                        b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'yellow'
+                        OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'newbie'
+                        THEN 3
+                      WHEN
+                        b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'red'
+                        OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'orange'
+                        THEN 4
+                      ELSE 0
+                      END = 3
+                    THEN 0.4
+                  WHEN
+                    b.ORD_ITEM.SITE_CURRENT_PRICE >= 4000
+                    AND (
+                      CASE
+                        WHEN b.ORD_ITEM.COMBO_ID NOT IN ('A') THEN 0
+                        ELSE 1
+                        END > 0
+                      OR CASE WHEN i.ITE_ITEM_CONDITION = 'new' THEN 0 ELSE 1 END > 0
+                      OR CASE
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_platinum'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_gold'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green_silver'
+                          THEN 1
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'green'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'light_green'
+                          THEN 2
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'yellow'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'newbie'
+                          THEN 3
+                        WHEN
+                          b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'red'
+                          OR b.ORD_SELLER.REPUTATION_LEVEL_STATUS = 'orange'
+                          THEN 4
+                        ELSE 0
+                        END = 4)
+                    THEN 0
+                  WHEN b.ORD_ITEM.SITE_CURRENT_PRICE < 4000 THEN 0
+                  ELSE 100
+                  END
+            ELSE 100
+            END)
+    ELSE 0
+    END
+    AS Tarifario_Seller_desc,
+  CASE
+    WHEN
+      CAST(s.shp_sender_id AS STRING) IN (
+        '449695682', '451402665', '451403353', '466063253', '480263032',
+        '480265022', '480448894', '481988724', '527927603', '530380977',
+        '537044407', '544457369', '544457773', '550063615', '550070308',
+        '550072427', '554328422', '557616860', '608846165', '608885756',
+        '608887919', '657077620', '417972986', '418149407', '418150521',
+        '538990655', '544453648', '671347056')
+      THEN 'first'
+    ELSE 'third'
+    END
+    AS FLAG_1P
+FROM  SHP_STAGING_V2 as S
+INNER JOIN `meli-bi-data.WHOWNER.LK_SHP_CDG_SHIPPING_COST` AS cdg
+  ON
+    cdg.shp_shipment_id = s.shp_shipment_id
+    AND UPPER(TRIM(cdg.sit_site_id)) = 'MLA'
+    AND CAST(cdg.shp_month_handling AS INT64)
+      BETWEEN  202110 and 202203 
+    AND TRIM(cdg.shp_picking_type_id_agg) IN ('XD','FBM','DS')
+INNER JOIN `meli-bi-data.WHOWNER.LK_ITE_ITEMS` AS i
+  ON
+    i.ite_item_id = s.ite_item_id
+    AND UPPER(TRIM(i.sit_site_id)) = 'MLA'
+    --AND i.photo_id = 'TODATE'
+INNER JOIN `meli-bi-data.WHOWNER.LK_SHP_ADDRESS` AS sa
+  ON s.shp_sender_address = sa.shp_add_id
+INNER JOIN `meli-bi-data.WHOWNER.BT_SHP_SNAPSHOT` AS p
+  ON s.shp_shipment_id = p.shp_shipment_id
+INNER JOIN `meli-bi-data.SBOX_SHPCDG.TARIFARIOSELLERMLA1` AS ts
+  ON
+    s.rango_peso_item_seller = ts.RANGO_PESO_MELI
+    AND UPPER(TRIM(PICKING_TYPE)) = UPPER(TRIM(TS.Picking_type))
+    AND s.shp_date_handling_id BETWEEN CAST(Vigencia_desde AS DATE) AND CAST(Vigencia_hasta AS DATE)
+    AND TRIM(TS.picking_type) IN ('XD','FBM','DS')
+INNER JOIN  `meli-bi-data.WHOWNER.BT_ORD_ORDERS` AS B
+  ON
+    CAST(s.SHP_ORDER_ID AS INT64) = B.ORD_ORDER_ID
+    AND TRIM(s.SIT_SITE_ID) = TRIM(B.SIT_SITE_ID)
+    AND S.SHP_RECEIVER_ID = b.ORD_BUYER.ID
+    AND s.ITE_ITEM_ID = B.ITE_ITEM_ID
+    --AND b.photo_id = 'TODATE'
+    AND B.ORD_CLOSED_DT BETWEEN '2021-04-01' AND CURRENT_DATE()
+LEFT JOIN `meli-bi-data.WHOWNER.LK_SEGMENTO_SELLERS` AS SSL
+  ON s.shp_sender_id = SSL.cus_cust_id_sel AND TRIM(s.sit_site_id) = TRIM(SSL.sit_site_id);
 
-create multiset table Temp_45.REVENUES_CDG_SELLER_MLA_XD5 as (
-SELECT 
-cdg.shp_month_handling, s.shp_shipment_id, si.shp_order_id, i.ite_item_id, s.shp_quantity as Shp_Qty,
-si.shp_quantity as Item_Qty_Order, si.shp_sender_id as shp_sender_id,
-b.bid_site_current_price,
-CASE WHEN b.cbo_combo_id not in ('A') THEN 0 ELSE 1 END AS Publicacion,  --Flag a las publicaicones free/not free
-CASE WHEN i.ite_condition = 'new' THEN 0 ELSE 1 END AS Articulo, --Flag articulo nuevo/usado
---Sis con FS opcional, debajo del thresh
-CASE WHEN b.ite_shp_payment_type_id = 'free_shipping' and (b.bid_site_current_price< 3500 or Publicacion> 0 or Articulo > 0)  THEN (1*Item_Qty_Order) ELSE 0 END AS FS_Item_opcional,
---Sis con FS mandatory, por arriba del tresh
-CASE WHEN Publicacion= 0 and Articulo = 0 and B.bid_site_current_price>=3500 then (1*Item_Qty_Order) else 0 end as FS_ITEM_mandatory,
---Sis con FS (opcional + mandatory)
-CASE WHEN b.ite_shp_payment_type_id = 'free_shipping' THEN (1*Item_Qty_Order) else 0 end as FS_ITEM_FLAG,
---Sellers que son tienda oficial
-CASE WHEN SSL.SEGMENTO = 'TO' THEN 1 ELSE 0 END AS T_Oficial,
---flag de reputacion del seller
-CASE WHEN b.BID_SELL_REP_LEVEL = 'green_platinum' OR b.BID_SELL_REP_LEVEL = 'green_gold' OR b.BID_SELL_REP_LEVEL  = 'green_silver' THEN 1
-     WHEN b.BID_SELL_REP_LEVEL = 'green' OR b.BID_SELL_REP_LEVEL = 'light_green' THEN 2
-     WHEN b.BID_SELL_REP_LEVEL = 'yellow' OR b.BID_SELL_REP_LEVEL = 'newbie' THEN 3
-     WHEN b.BID_SELL_REP_LEVEL = 'red' OR b.BID_SELL_REP_LEVEL = 'orange' THEN 4
-     ELSE 0 END AS SELLER_REP,
-cdg.shp_picking_type_id_agg as PICKING_TYPE,
---Descuento que aplica segun tipo de envio y reputacion
-CASE WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND T_Oficial = 1 THEN 0.5
-      WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND (SELLER_REP = 1 OR SELLER_REP = 2) THEN 0.5
-     WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND SELLER_REP = 3 THEN 0.4 
-     WHEN B.bid_site_current_price >= 3500 AND (Publicacion > 0 OR Articulo > 0 OR  SELLER_REP = 4) THEN 0
-     WHEN B.bid_site_current_price < 3500 THEN 0
-          ELSE 100 END AS SUBSIDIO_SELLER,
---calculo peso volumetrico por Si
-
-CASE WHEN (si.SHP_ITE_WEIGHT*1.000/1000) <=2 THEN (si.SHP_ITE_WEIGHT*1.000/1000)
-     WHEN ((si.SHP_ITE_DIMENSION_MAX*si.SHP_ITE_DIMENSION_MID*si.SHP_ITE_DIMENSION_MIN)/4000) > (si.SHP_ITE_WEIGHT*1.000/1000) THEN ((si.SHP_ITE_DIMENSION_MAX*si.SHP_ITE_DIMENSION_MID*si.SHP_ITE_DIMENSION_MIN)/4000)
-ELSE (si.SHP_ITE_WEIGHT*1.000/1000) end as weight_item,
-
-Case when weight_item <= 0.50 then '0.5'
-          when weight_item <= 1.00 then '1'
-          when weight_item <= 2.00 then '2'
-          when weight_item <= 5.00 then '5'
-          when weight_item <= 10.00 then '10'
-          when weight_item <= 15.00 then '15'
-          when weight_item <= 20.00 then '20'
-          when weight_item <= 25.00 then '25'
-          else '30' end as rango_peso_item_seller,
---Traigo tarifario seller
-ts.precio_seller AS Precio_Seller_It,
-CASE WHEN  (FS_Item_opcional > 0 or FS_ITEM_mandatory > 0)THEN precio_seller_It * Item_Qty_Order
-      ELSE 0 END AS Tarifario_Seller,
--------------------------------------------------
---construccion del tarifario seller con los descuentos correspondientes
-CASE WHEN (FS_Item_opcional > 0 or FS_ITEM_mandatory > 0)THEN (precio_seller_It * Item_Qty_Order)*(1-SUBSIDIO_SELLER)
-      ELSE 0 END AS Tarifario_Seller_desc,
-case when s.shp_sender_id in ('449695682','451402665','451403353','466063253','480263032','480265022','480448894','481988724','527927603','530380977','537044407','544457369','544457773','550063615','550070308','550072427','554328422','557616860','608846165','608885756','608887919','657077620','417972986','418149407','418150521','538990655','544453648','671347056') then 'first' else 'third' end AS FLAG_1P
-FROM WHOWNER.BT_SHP_SHIPMENTS s
-inner JOIN WHOWNER.LK_SHP_CDG_SHIPPING_COST cdg on cdg.shp_shipment_id = s.shp_shipment_id
-and cdg.sit_site_id = 'MLA'
-and cdg.shp_month_handling BETWEEN
-(case when
-trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) < 10
-then trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4)))||trim(0)||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) 
-else trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4)))||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) END)
-AND
-(case when
-trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) < 10
-then trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0)))||trim(0)||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) 
-else trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0)))||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) END)
---and s.shp_date_handling_id not between '2021-05-21' and DATE
-AND cdg.shp_picking_type_id_agg in ('XD')
---inner JOIN FINANCE.FS_THRESHOLD T ON (s.sit_site_id = t.site AND s.tim_day_winning_date >= t.date_from AND s.tim_day_winning_date < t.date_to)
-inner JOIN WHOWNER.BT_SHP_SHIPPING_ITEMS AS si ON si.shp_shipment_id = s.shp_shipment_id
---AND s.shp_picking_type_id='fulfillment'
-AND si.SHP_SENDER_ID is not null
-inner JOIN WHOWNER.LK_ITE_ITEMS_PH AS i ON i.ite_item_id = si.ite_item_id 
-AND i.sit_site_id = 'MLA'
-AND i.photo_id = 'TODATE'
-inner JOIN whowner.lk_shp_address sa on s.shp_sender_address = sa.shp_add_id
-inner JOIN WHOWNER.BT_SHP_SNAPSHOT p on s.shp_shipment_id = p.shp_shipment_id
-inner  JOIN TEMP_45.TARIFARIOSELLERMLA1 ts ON rango_peso_item_seller = ts.RANGO_PESO_MELI AND PICKING_TYPE = TS.Picking_type
---and s.shp_date_handling_id between Vigencia_desde and Vigencia_hasta
-AND TS. picking_type = 'XD'
-inner JOIN WHOWNER.BT_BIDS AS B ON si.SHP_ORDER_ID = B.ORD_ORDER_ID 
-AND s.SIT_SITE_ID = B.SIT_SITE_ID 
-AND S.SHP_RECEIVER_ID = B.CUS_CUST_ID_BUY 
-AND Si.ITE_ITEM_ID = B.ITE_ITEM_ID
-AND b.photo_id = 'TODATE'
-AND B.TIM_DAY_WINNING_DATE BETWEEN '2021-04-01' AND DATE
-LEFT JOIN WHOWNER.LK_SEGMENTO_SELLERS SSL on s.shp_sender_id= SSL.cus_cust_id_sel
-AND s.sit_site_id = SSL.sit_site_id
-
-) with data unique primary index (Shp_shipment_id, shp_order_id);
 
 
---drop table Temp_45.REVENUES_CDG_SELLER_MLA_FBM5;
-create multiset table Temp_45.REVENUES_CDG_SELLER_MLA_FBM5 as (
-SELECT 
-cdg.shp_month_handling, s.shp_shipment_id, si.shp_order_id, i.ite_item_id, s.shp_quantity as Shp_Qty,
-si.shp_quantity as Item_Qty_Order, si.shp_sender_id as shp_sender_id,
-b.bid_site_current_price,
-CASE WHEN b.cbo_combo_id not in ('A') THEN 0 ELSE 1 END AS Publicacion,  --Flag a las publicaicones free/not free
-CASE WHEN i.ite_condition = 'new' THEN 0 ELSE 1 END AS Articulo, --Flag articulo nuevo/usado
---Sis con FS opcional, debajo del thresh
-CASE WHEN b.ite_shp_payment_type_id = 'free_shipping' and (b.bid_site_current_price< 3500 or Publicacion> 0 or Articulo > 0)  THEN (1*Item_Qty_Order) ELSE 0 END AS FS_Item_opcional,
---Sis con FS mandatory, por arriba del tresh
-CASE WHEN Publicacion= 0 and Articulo = 0 and B.bid_site_current_price>=3500 then (1*Item_Qty_Order) else 0 end as FS_ITEM_mandatory,
---Sis con FS (opcional + mandatory)
-CASE WHEN b.ite_shp_payment_type_id = 'free_shipping' THEN (1*Item_Qty_Order) else 0 end as FS_ITEM_FLAG,
---Sellers que son tienda oficial
-CASE WHEN SSL.SEGMENTO = 'TO' THEN 1 ELSE 0 END AS T_Oficial,
---flag de reputacion del seller
-CASE WHEN b.BID_SELL_REP_LEVEL = 'green_platinum' OR b.BID_SELL_REP_LEVEL = 'green_gold' OR b.BID_SELL_REP_LEVEL  = 'green_silver' THEN 1
-     WHEN b.BID_SELL_REP_LEVEL = 'green' OR b.BID_SELL_REP_LEVEL = 'light_green' THEN 2
-     WHEN b.BID_SELL_REP_LEVEL = 'yellow' OR b.BID_SELL_REP_LEVEL = 'newbie' THEN 3
-     WHEN b.BID_SELL_REP_LEVEL = 'red' OR b.BID_SELL_REP_LEVEL = 'orange' THEN 4
-     ELSE 0 END AS SELLER_REP,
-cdg.shp_picking_type_id_agg as PICKING_TYPE,
---Descuento que aplica segun tipo de envio y reputacion
-CASE WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND T_Oficial = 1 THEN 0.5
-      WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND (SELLER_REP = 1 OR SELLER_REP = 2) THEN 0.5
-     WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND SELLER_REP = 3 THEN 0.4 
-     WHEN B.bid_site_current_price >= 3500 AND (Publicacion > 0 OR Articulo > 0 OR  SELLER_REP = 4) THEN 0
-     WHEN B.bid_site_current_price < 3500 THEN 0
-          ELSE 100 END AS SUBSIDIO_SELLER,
---calculo peso volumetrico por Si
 
-CASE WHEN (si.SHP_ITE_WEIGHT*1.000/1000) <=2 THEN (si.SHP_ITE_WEIGHT*1.000/1000)
-     WHEN ((si.SHP_ITE_DIMENSION_MAX*si.SHP_ITE_DIMENSION_MID*si.SHP_ITE_DIMENSION_MIN)/4000) > (si.SHP_ITE_WEIGHT*1.000/1000) THEN ((si.SHP_ITE_DIMENSION_MAX*si.SHP_ITE_DIMENSION_MID*si.SHP_ITE_DIMENSION_MIN)/4000)
-ELSE (si.SHP_ITE_WEIGHT*1.000/1000) end as weight_item,
 
-Case when weight_item <= 0.50 then '0.5'
-          when weight_item <= 1.00 then '1'
-          when weight_item <= 2.00 then '2'
-          when weight_item <= 5.00 then '5'
-          when weight_item <= 10.00 then '10'
-          when weight_item <= 15.00 then '15'
-          when weight_item <= 20.00 then '20'
-          when weight_item <= 25.00 then '25'
-          else '30' end as rango_peso_item_seller,
---Traigo tarifario seller
-ts.precio_seller AS Precio_Seller_It,
-CASE WHEN  (FS_Item_opcional > 0 or FS_ITEM_mandatory > 0)THEN precio_seller_It * Item_Qty_Order
-      ELSE 0 END AS Tarifario_Seller,
--------------------------------------------------
---construccion del tarifario seller con los descuentos correspondientes
-CASE WHEN (FS_Item_opcional > 0 or FS_ITEM_mandatory > 0)THEN (precio_seller_It * Item_Qty_Order)*(1-SUBSIDIO_SELLER)
-      ELSE 0 END AS Tarifario_Seller_desc,
-case when s.shp_sender_id in ('449695682','451402665','451403353','466063253','480263032','480265022','480448894','481988724','527927603','530380977','537044407','544457369','544457773','550063615','550070308','550072427','554328422','557616860','608846165','608885756','608887919','657077620','417972986','418149407','418150521','538990655','544453648','671347056') then 'first' else 'third' end AS FLAG_1P
-FROM WHOWNER.BT_SHP_SHIPMENTS s
-inner JOIN WHOWNER.LK_SHP_CDG_SHIPPING_COST cdg on cdg.shp_shipment_id = s.shp_shipment_id
-and cdg.sit_site_id = 'MLA'
-and cdg.shp_month_handling BETWEEN
-(case when
-trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) < 10
-then trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4)))||trim(0)||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) 
-else trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4)))||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) END)
-AND
-(case when
-trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) < 10
-then trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0)))||trim(0)||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) 
-else trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0)))||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) END)
---and s.shp_date_handling_id not between '2021-05-21' and DATE
-AND cdg.shp_picking_type_id_agg in ('FBM')
---inner JOIN FINANCE.FS_THRESHOLD T ON (s.sit_site_id = t.site AND s.tim_day_winning_date >= t.date_from AND s.tim_day_winning_date < t.date_to)
-inner JOIN WHOWNER.BT_SHP_SHIPPING_ITEMS AS si ON si.shp_shipment_id = s.shp_shipment_id
---AND s.shp_picking_type_id='fulfillment'
-AND si.SHP_SENDER_ID is not null
-inner JOIN WHOWNER.LK_ITE_ITEMS_PH AS i ON i.ite_item_id = si.ite_item_id 
-AND i.sit_site_id = 'MLA'
-AND i.photo_id = 'TODATE'
-inner JOIN whowner.lk_shp_address sa on s.shp_sender_address = sa.shp_add_id
-inner JOIN WHOWNER.BT_SHP_SNAPSHOT p on s.shp_shipment_id = p.shp_shipment_id
-inner JOIN TEMP_45.TARIFARIOSELLERMLA1 ts ON rango_peso_item_seller = ts.RANGO_PESO_MELI AND PICKING_TYPE = TS.Picking_type
---and s.shp_date_handling_id between Vigencia_desde and Vigencia_hasta
-AND TS. picking_type = 'FBM'
-inner JOIN WHOWNER.BT_BIDS AS B ON si.SHP_ORDER_ID = B.ORD_ORDER_ID 
-AND s.SIT_SITE_ID = B.SIT_SITE_ID 
-AND S.SHP_RECEIVER_ID = B.CUS_CUST_ID_BUY 
-AND Si.ITE_ITEM_ID = B.ITE_ITEM_ID
-AND b.photo_id = 'TODATE'
-AND B.TIM_DAY_WINNING_DATE BETWEEN '2021-04-01' AND DATE
-LEFT JOIN WHOWNER.LK_SEGMENTO_SELLERS SSL on s.shp_sender_id= SSL.cus_cust_id_sel
-AND s.sit_site_id = SSL.sit_site_id
-
-) with data unique primary index (Shp_shipment_id, shp_order_id);
-
---DROP TABLE temp_45.REVENUES_CDG_SELLER_MLA_DS5;
-create multiset table Temp_45.REVENUES_CDG_SELLER_MLA_DS5 as (
-SELECT 
-cdg.shp_month_handling, s.shp_shipment_id, si.shp_order_id, i.ite_item_id, s.shp_quantity as Shp_Qty,
-si.shp_quantity as Item_Qty_Order, si.shp_sender_id as shp_sender_id,
-b.bid_site_current_price,
-CASE WHEN b.cbo_combo_id not in ('A') THEN 0 ELSE 1 END AS Publicacion,  --Flag a las publicaicones free/not free
-CASE WHEN i.ite_condition = 'new' THEN 0 ELSE 1 END AS Articulo, --Flag articulo nuevo/usado
---Sis con FS opcional, debajo del thresh
-CASE WHEN b.ite_shp_payment_type_id = 'free_shipping' and (b.bid_site_current_price< 3500 or Publicacion> 0 or Articulo > 0)  THEN (1*Item_Qty_Order) ELSE 0 END AS FS_Item_opcional,
---Sis con FS mandatory, por arriba del tresh
-CASE WHEN Publicacion= 0 and Articulo = 0 and B.bid_site_current_price>=3500 then (1*Item_Qty_Order) else 0 end as FS_ITEM_mandatory,
---Sis con FS (opcional + mandatory)
-CASE WHEN b.ite_shp_payment_type_id = 'free_shipping' THEN (1*Item_Qty_Order) else 0 end as FS_ITEM_FLAG,
---Sellers que son tienda oficial
-CASE WHEN SSL.SEGMENTO = 'TO' THEN 1 ELSE 0 END AS T_Oficial,
---flag de reputacion del seller
-CASE WHEN b.BID_SELL_REP_LEVEL = 'green_platinum' OR b.BID_SELL_REP_LEVEL = 'green_gold' OR b.BID_SELL_REP_LEVEL  = 'green_silver' THEN 1
-     WHEN b.BID_SELL_REP_LEVEL = 'green' OR b.BID_SELL_REP_LEVEL = 'light_green' THEN 2
-     WHEN b.BID_SELL_REP_LEVEL = 'yellow' OR b.BID_SELL_REP_LEVEL = 'newbie' THEN 3
-     WHEN b.BID_SELL_REP_LEVEL = 'red' OR b.BID_SELL_REP_LEVEL = 'orange' THEN 4
-     ELSE 0 END AS SELLER_REP,
-cdg.shp_picking_type_id_agg as PICKING_TYPE,
---Descuento que aplica segun tipo de envio y reputacion
-CASE WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND T_Oficial = 1 THEN 0.5
-      WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND (SELLER_REP = 1 OR SELLER_REP = 2) THEN 0.5
-     WHEN B.bid_site_current_price >= 3500 AND  Publicacion = 0 AND Articulo = 0 AND SELLER_REP = 3 THEN 0.4 
-     WHEN B.bid_site_current_price >= 3500 AND (Publicacion > 0 OR Articulo > 0 OR  SELLER_REP = 4) THEN 0
-     WHEN B.bid_site_current_price < 3500 THEN 0
-          ELSE 100 END AS SUBSIDIO_SELLER,
---calculo peso volumetrico por Si
-
-CASE WHEN (si.SHP_ITE_WEIGHT*1.000/1000) <=2 THEN (si.SHP_ITE_WEIGHT*1.000/1000)
-     WHEN ((si.SHP_ITE_DIMENSION_MAX*si.SHP_ITE_DIMENSION_MID*si.SHP_ITE_DIMENSION_MIN)/4000) > (si.SHP_ITE_WEIGHT*1.000/1000) THEN ((si.SHP_ITE_DIMENSION_MAX*si.SHP_ITE_DIMENSION_MID*si.SHP_ITE_DIMENSION_MIN)/4000)
-ELSE (si.SHP_ITE_WEIGHT*1.000/1000) end as weight_item,
-
-Case when weight_item <= 0.50 then '0.5'
-          when weight_item <= 1.00 then '1'
-          when weight_item <= 2.00 then '2'
-          when weight_item <= 5.00 then '5'
-          when weight_item <= 10.00 then '10'
-          when weight_item <= 15.00 then '15'
-          when weight_item <= 20.00 then '20'
-          when weight_item <= 25.00 then '25'
-          else '30' end as rango_peso_item_seller,
---Traigo tarifario seller
-ts.precio_seller AS Precio_Seller_It,
-CASE WHEN  (FS_Item_opcional > 0 or FS_ITEM_mandatory > 0)THEN precio_seller_It * Item_Qty_Order
-      ELSE 0 END AS Tarifario_Seller,
--------------------------------------------------
---construccion del tarifario seller con los descuentos correspondientes
-CASE WHEN (FS_Item_opcional > 0 or FS_ITEM_mandatory > 0)THEN (precio_seller_It * Item_Qty_Order)*(1-SUBSIDIO_SELLER)
-      ELSE 0 END AS Tarifario_Seller_desc,
-case when s.shp_sender_id in ('449695682','451402665','451403353','466063253','480263032','480265022','480448894','481988724','527927603','530380977','537044407','544457369','544457773','550063615','550070308','550072427','554328422','557616860','608846165','608885756','608887919','657077620','417972986','418149407','418150521','538990655','544453648','671347056') then 'first' else 'third' end AS FLAG_1P
-FROM WHOWNER.BT_SHP_SHIPMENTS s
-inner JOIN WHOWNER.LK_SHP_CDG_SHIPPING_COST cdg on cdg.shp_shipment_id = s.shp_shipment_id
-and cdg.sit_site_id = 'MLA'
-and cdg.shp_month_handling BETWEEN
-(case when
-trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) < 10
-then trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4)))||trim(0)||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) 
-else trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4)))||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE)-1),-4))) END)
-AND
-(case when
-trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) < 10
-then trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0)))||trim(0)||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) 
-else trim(YEAR(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0)))||trim(MONTH(ADD_MONTHS(DATE - (EXTRACT(DAY FROM DATE-1)),0))) END)
---and s.shp_date_handling_id not between '2021-05-21' and DATE
-AND cdg.shp_picking_type_id_agg in ('DS')
---inner JOIN FINANCE.FS_THRESHOLD T ON (s.sit_site_id = t.site AND s.tim_day_winning_date >= t.date_from AND s.tim_day_winning_date < t.date_to)
-inner JOIN WHOWNER.BT_SHP_SHIPPING_ITEMS AS si ON si.shp_shipment_id = s.shp_shipment_id
---AND s.shp_picking_type_id='fulfillment'
-AND si.SHP_SENDER_ID is not null
-inner JOIN WHOWNER.LK_ITE_ITEMS_PH AS i ON i.ite_item_id = si.ite_item_id 
-AND i.sit_site_id = 'MLA'
-AND i.photo_id = 'TODATE'
-inner JOIN whowner.lk_shp_address sa on s.shp_sender_address = sa.shp_add_id
-inner JOIN WHOWNER.BT_SHP_SNAPSHOT p on s.shp_shipment_id = p.shp_shipment_id
-inner JOIN TEMP_45.TARIFARIOSELLERMLA1 ts ON rango_peso_item_seller = ts.RANGO_PESO_MELI AND PICKING_TYPE = TS.Picking_type
---and s.shp_date_handling_id between Vigencia_desde and Vigencia_hasta
-AND TS. picking_type = 'DS'
-inner JOIN WHOWNER.BT_BIDS AS B ON si.SHP_ORDER_ID = B.ORD_ORDER_ID 
-AND s.SIT_SITE_ID = B.SIT_SITE_ID 
-AND S.SHP_RECEIVER_ID = B.CUS_CUST_ID_BUY 
-AND Si.ITE_ITEM_ID = B.ITE_ITEM_ID
-AND b.photo_id = 'TODATE'
-AND B.TIM_DAY_WINNING_DATE BETWEEN '2021-04-01' AND DATE
-LEFT JOIN WHOWNER.LK_SEGMENTO_SELLERS SSL on s.shp_sender_id= SSL.cus_cust_id_sel
-AND s.sit_site_id = SSL.sit_site_id
-
-) with data unique primary index (Shp_shipment_id, shp_order_id);
-
---DROP TABLE Temp_45.REVENUES_CDG_SELLER_MLA5;
-create multiset table Temp_45.REVENUES_CDG_SELLER_MLA5 as (
-SELECT * from Temp_45.REVENUES_CDG_SELLER_MLA_FBM5
+DROP TABLE IF EXISTS `meli-bi-data.TMP.REVENUES_CDG_SELLER_MLA5`;
+CREATE TABLE `meli-bi-data.TMP.REVENUES_CDG_SELLER_MLA5`
+  CLUSTER BY SHP_MONTH_HANDLING, Shp_Qty,Item_Qty_Order
+AS SELECT * except(PICKING_TYPE_TS) FROM `meli-bi-data.SBOX_SHPCDG.REVENUES_CDG_SELLER_MLA_STAGING` WHERE TRIM(PICKING_TYPE) IN ('FBM') AND UPPER(TRIM(PICKING_TYPE_TS)) = 'FBM' 
 UNION ALL
-SELECT * from Temp_45.REVENUES_CDG_SELLER_MLA_XD5
+SELECT * except(PICKING_TYPE_TS)  FROM `meli-bi-data.SBOX_SHPCDG.REVENUES_CDG_SELLER_MLA_STAGING`   WHERE TRIM(PICKING_TYPE) IN ('XD')  AND UPPER(TRIM(PICKING_TYPE_TS)) = 'XD' 
 UNION ALL
-SELECT * from Temp_45.REVENUES_CDG_SELLER_MLA_DS5
-) with data unique primary index (Shp_shipment_id, shp_order_id);
+SELECT * except(PICKING_TYPE_TS) FROM `meli-bi-data.SBOX_SHPCDG.REVENUES_CDG_SELLER_MLA_STAGING`    WHERE TRIM(PICKING_TYPE) IN ('DS')  AND UPPER(TRIM(PICKING_TYPE_TS)) = 'DS' ;
 
 
---DROP TABLE Temp_45.DUMP_REVENUES_SELLER_MLA5;
-create multiset table Temp_45.DUMP_REVENUES_SELLER_MLA5 as (
+DROP TABLE IF EXISTS `meli-bi-data.TMP.DUMP_REVENUES_SELLER_MLA5`;  
+CREATE TABLE `meli-bi-data.TMP.DUMP_REVENUES_SELLER_MLA5`
+  CLUSTER BY
+    shp_month_handling, PICKING_TYPE, TIPO_ENVIO
+AS
 SELECT
-shp_month_handling,
-PICKING_TYPE,
-Case when FS_Item_opcional > 0 then 'FS OPCIONAL'
-     when FS_ITEM_mandatory > 0 then 'FS MANDATORY'
-     Else 'No aplica' END as TIPO_ENVIO,
-Case when T_Oficial = 1 then 1
-     Else SELLER_REP END as SELLER_REP,
-rango_peso_item_seller,
-CASE when Publicacion > 0 or Articulo > 0 then 1 else 0 end as FLAG_GRATUITO,
-sum(Item_Qty_Order) Item_Qty_Order,
-count(distinct shp_shipment_id) shp_shipment_id,
-sum(Tarifario_Seller/1.21) as TEORICO_SELLER,
-sum(Tarifario_Seller_desc/1.21) as REAL_SELLER
-FROM Temp_45.REVENUES_CDG_SELLER_MLA5 
---WHERE FS_ITEM_FLAG > 0 --Filtro los envios sin FS
-WHERE (FLAG_1P not in ('first'))
-AND tipo_envio IS NOT IN ('No aplica')
-group by 1,2,3,4,5,6 
+  shp_month_handling,
+  PICKING_TYPE,
+  CASE
+    WHEN FS_Item_opcional > 0 THEN 'FS OPCIONAL'
+    WHEN FS_ITEM_mandatory > 0 THEN 'FS MANDATORY'
+    ELSE 'No aplica'
+    END
+    AS TIPO_ENVIO,
+  CASE WHEN T_Oficial = 1 THEN 1 ELSE SELLER_REP END AS SELLER_REP,
+  rango_peso_item_seller,
+  CASE WHEN Publicacion > 0 OR Articulo > 0 THEN 1 ELSE 0 END AS FLAG_GRATUITO,
+  SUM(Item_Qty_Order) AS Item_Qty_Order,
+  COUNT(DISTINCT shp_shipment_id) AS shp_shipment_id,
+  SUM(Tarifario_Seller / 1.21) AS TEORICO_SELLER,
+  SUM(Tarifario_Seller_desc / 1.21) AS REAL_SELLER
+FROM `meli-bi-data.TMP.REVENUES_CDG_SELLER_MLA5`
+WHERE TRIM(FLAG_1P) NOT IN ('first') 
+  AND 
+    CASE
+        WHEN FS_Item_opcional > 0 THEN 'FS OPCIONAL'
+        WHEN FS_ITEM_mandatory > 0 THEN 'FS MANDATORY'
+        ELSE 'No aplica'
+        END 
+    NOT IN ('No aplica')
+GROUP BY 1, 2, 3, 4, 5, 6;
 
-) with data unique primary index (shp_month_handling,PICKING_TYPE,TIPO_ENVIO,SELLER_REP,rango_peso_item_seller,FLAG_GRATUITO);
+
+-- ACUMULACIÓN DE HISTÓRICO EN TABLA
+-- Elimino repetidos para evitar duplicar info
+DELETE
+FROM `meli-bi-data.SBOX_SHPCDG.REVENUES_CDG_SELLER_MLA_HISTO` A1
+WHERE A1.SHP_SHIPMENT_ID IN (SELECT SHP_SHIPMENT_ID FROM `meli-bi-data.TMP.REVENUES_CDG_SELLER_MLA5`);
+-- Pego la nueva info de la intermedia a la histórica
+INSERT `meli-bi-data.SBOX_SHPCDG.REVENUES_CDG_SELLER_MLA_HISTO`
+SELECT 
+CAST(shp_month_handling as INT64) as shp_month_handling  ,
+shp_shipment_id ,
+CAST(shp_order_id as NUMERIC) as shp_order_id   ,
+ite_item_id ,
+Shp_Qty ,
+Item_Qty_Order  ,
+shp_sender_id ,
+SITE_CURRENT_PRICE  ,
+Publicacion ,
+Articulo  ,
+FS_Item_opcional  ,
+FS_ITEM_mandatory ,
+FS_ITEM_FLAG  ,
+T_Oficial ,
+SELLER_REP  ,
+PICKING_TYPE   ,
+CAST(SUBSIDIO_SELLER as NUMERIC ) as SUBSIDIO_SELLER,
+weight_item ,
+rango_peso_item_seller   ,
+CAST(Precio_Seller_It as STRING ) as Precio_Seller_It,
+Tarifario_Seller  ,
+Tarifario_Seller_desc ,
+FLAG_1P 
+FROM `meli-bi-data.TMP.REVENUES_CDG_SELLER_MLA5`;
+
 
